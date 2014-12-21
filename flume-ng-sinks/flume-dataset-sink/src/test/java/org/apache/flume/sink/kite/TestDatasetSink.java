@@ -18,6 +18,7 @@
 
 package org.apache.flume.sink.kite;
 
+import com.google.common.base.Charsets;
 import com.google.common.base.Function;
 import com.google.common.base.Throwables;
 import com.google.common.collect.Iterables;
@@ -51,6 +52,7 @@ import org.apache.flume.EventDeliveryException;
 import org.apache.flume.Transaction;
 import org.apache.flume.channel.MemoryChannel;
 import org.apache.flume.conf.Configurables;
+import org.apache.flume.event.EventBuilder;
 import org.apache.flume.event.SimpleEvent;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
@@ -67,6 +69,10 @@ import org.kitesdk.data.DatasetReader;
 import org.kitesdk.data.Datasets;
 import org.kitesdk.data.PartitionStrategy;
 import org.kitesdk.data.View;
+
+import static org.apache.flume.sink.kite.DatasetSinkConstants.CONFIG_CSV_DELIMITER;
+import static org.apache.flume.sink.kite.DatasetSinkConstants.CONFIG_CSV_HEADER;
+import static org.apache.flume.sink.kite.DatasetSinkConstants.CONFIG_EVENT_PARSER;
 
 public class TestDatasetSink {
 
@@ -509,6 +515,80 @@ public class TestDatasetSink {
         expected.size() + 1, remaining(in));
   }
 
+  @Test
+  public void testCSVEvents() throws EventDeliveryException {
+    config.put(CONFIG_EVENT_PARSER, "csv");
+
+    Channel csv = new MemoryChannel();
+    Configurables.configure(csv, config);
+
+    putToChannel(csv,
+        csvEvent("1,msg1", null), // no header, use the schema's order
+        csvEvent("msg2,2", "msg,id"),
+        csvEvent("3,msg3", "id,msg"));
+
+    DatasetSink sink = sink(csv, config);
+
+    // run the sink
+    sink.start();
+    sink.process();
+    sink.stop();
+
+    Assert.assertEquals("Should match expected records",
+        Sets.newHashSet(expected), read(Datasets.load(FILE_DATASET_URI)));
+    Assert.assertEquals("Should have committed", 0, remaining(csv));
+  }
+
+  @Test
+  public void testCSVEventsWithHeader() throws EventDeliveryException {
+    config.put(CONFIG_EVENT_PARSER, "csv");
+    config.put(CONFIG_CSV_HEADER, "msg,id");
+
+    Channel csv = new MemoryChannel();
+    Configurables.configure(csv, config);
+
+    putToChannel(csv,
+        csvEvent("msg1,1", null), // no header, use the default header
+        csvEvent("msg2,2", "msg,id"),
+        csvEvent("3,msg3", "id,msg"));
+
+    DatasetSink sink = sink(csv, config);
+
+    // run the sink
+    sink.start();
+    sink.process();
+    sink.stop();
+
+    Assert.assertEquals("Should match expected records",
+        Sets.newHashSet(expected), read(Datasets.load(FILE_DATASET_URI)));
+    Assert.assertEquals("Should have committed", 0, remaining(csv));
+  }
+
+  @Test
+  public void testCSVEventsWithCSVOptions() throws EventDeliveryException {
+    config.put(CONFIG_EVENT_PARSER, "csv");
+    config.put(CONFIG_CSV_DELIMITER, "|");
+
+    Channel csv = new MemoryChannel();
+    Configurables.configure(csv, config);
+
+    putToChannel(csv,
+        csvEvent("1|msg1", null), // no header, use the schema's order
+        csvEvent("msg2|2", "msg,id"),
+        csvEvent("3|msg3", "id,msg"));
+
+    DatasetSink sink = sink(csv, config);
+
+    // run the sink
+    sink.start();
+    sink.process();
+    sink.stop();
+
+    Assert.assertEquals("Should match expected records",
+        Sets.newHashSet(expected), read(Datasets.load(FILE_DATASET_URI)));
+    Assert.assertEquals("Should have committed", 0, remaining(csv));
+  }
+
   public static DatasetSink sink(Channel in, Context config) {
     DatasetSink sink = new DatasetSink();
     sink.setChannel(in);
@@ -586,6 +666,14 @@ public class TestDatasetSink {
     e.setBody(serialize(datum, schema));
     e.setHeaders(headers);
     return e;
+  }
+
+  public static Event csvEvent(String data, @Nullable String header) {
+    Map<String, String> headers = Maps.newHashMap();
+    if (header != null) {
+      headers.put(DatasetSinkConstants.CONFIG_CSV_HEADER, header);
+    }
+    return EventBuilder.withBody(data, Charsets.UTF_8, headers);
   }
 
   @SuppressWarnings("unchecked")

@@ -21,25 +21,12 @@ package org.apache.flume.sink.kite;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
 import com.google.common.collect.Lists;
-import java.io.IOException;
-import java.io.InputStream;
 import java.net.URI;
-import java.net.URL;
 import java.security.PrivilegedExceptionAction;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.concurrent.ExecutionException;
 import org.apache.avro.Schema;
-import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericRecord;
-import org.apache.avro.io.BinaryDecoder;
-import org.apache.avro.io.DatumReader;
-import org.apache.avro.io.DecoderFactory;
 import org.apache.flume.Channel;
 import org.apache.flume.Context;
 import org.apache.flume.Event;
@@ -48,9 +35,6 @@ import org.apache.flume.Transaction;
 import org.apache.flume.conf.Configurable;
 import org.apache.flume.instrumentation.SinkCounter;
 import org.apache.flume.sink.AbstractSink;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.kitesdk.data.Dataset;
 import org.kitesdk.data.DatasetDescriptor;
@@ -63,6 +47,11 @@ import org.kitesdk.data.spi.URIBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.flume.sink.kite.DatasetSinkConstants.AVRO_EVENT_PARSER;
+import static org.apache.flume.sink.kite.DatasetSinkConstants.CONFIG_EVENT_PARSER;
+import static org.apache.flume.sink.kite.DatasetSinkConstants.CSV_EVENT_PARSER;
+import static org.apache.flume.sink.kite.DatasetSinkConstants.DEFAULT_EVENT_PARSER;
+
 /**
  * Experimental sink that writes events to a Kite Dataset. This sink will
  * deserialize the body of each incoming event and store the resulting record
@@ -74,11 +63,10 @@ public class DatasetSink extends AbstractSink implements Configurable {
 
   private static final Logger LOG = LoggerFactory.getLogger(DatasetSink.class);
 
-  static Configuration conf = new Configuration();
-
   private String datasetName = null;
   private long batchSize = DatasetSinkConstants.DEFAULT_BATCH_SIZE;
 
+  private Context config;
   private URI target = null;
   private Schema targetSchema = null;
   private DatasetWriter<GenericRecord> writer = null;
@@ -91,52 +79,9 @@ public class DatasetSink extends AbstractSink implements Configurable {
 
   // for working with avro serialized records
   private GenericRecord datum = null;
+  private EventDeserializer<GenericRecord> deserializer;
   // TODO: remove this after PARQUET-62 is released
   private boolean reuseDatum = true;
-  private BinaryDecoder decoder = null;
-  private LoadingCache<Schema, DatumReader<GenericRecord>> readers =
-      CacheBuilder.newBuilder()
-      .build(new CacheLoader<Schema, DatumReader<GenericRecord>>() {
-        @Override
-        public DatumReader<GenericRecord> load(Schema schema) {
-          // must use the target dataset's schema for reading to ensure the
-          // records are able to be stored using it
-          return new GenericDatumReader<GenericRecord>(
-            schema, targetSchema);
-        }
-      });
-  private static LoadingCache<String, Schema> schemasFromLiteral = CacheBuilder
-      .newBuilder()
-      .build(new CacheLoader<String, Schema>() {
-        @Override
-        public Schema load(String literal) {
-          Preconditions.checkNotNull(literal,
-              "Schema literal cannot be null without a Schema URL");
-          return new Schema.Parser().parse(literal);
-        }
-      });
-  private static LoadingCache<String, Schema> schemasFromURL = CacheBuilder
-      .newBuilder()
-      .build(new CacheLoader<String, Schema>() {
-        @Override
-        public Schema load(String url) throws IOException {
-          Schema.Parser parser = new Schema.Parser();
-          InputStream is = null;
-          try {
-            FileSystem fs = FileSystem.get(URI.create(url), conf);
-            if (url.toLowerCase(Locale.ENGLISH).startsWith("hdfs:/")) {
-              is = fs.open(new Path(url));
-            } else {
-              is = new URL(url).openStream();
-            }
-            return parser.parse(is);
-          } finally {
-            if (is != null) {
-              is.close();
-            }
-          }
-        }
-      });
 
   protected List<String> allowedFormats() {
     return Lists.newArrayList("avro", "parquet");
@@ -144,6 +89,8 @@ public class DatasetSink extends AbstractSink implements Configurable {
 
   @Override
   public void configure(Context context) {
+    this.config = context; // save for initializing deserializers
+
     // initialize login credentials
     this.login = KerberosUtil.login(
         context.getString(DatasetSinkConstants.AUTH_PRINCIPAL),
@@ -251,7 +198,7 @@ public class DatasetSink extends AbstractSink implements Configurable {
           break;
         }
 
-        this.datum = deserialize(event, reuseDatum ? datum : null);
+        this.datum = deserializer.deserialize(event, reuseDatum ? datum : null);
 
         // writeEncoded would be an optimization in some cases, but HBase
         // will not support it and partitioned Datasets need to get partition
@@ -326,8 +273,8 @@ public class DatasetSink extends AbstractSink implements Configurable {
     Schema newSchema = descriptor.getSchema();
     if (targetSchema == null || !newSchema.equals(targetSchema)) {
       this.targetSchema = descriptor.getSchema();
-      // target dataset schema has changed, invalidate all readers based on it
-      readers.invalidateAll();
+      // target dataset schema has changed, get a new deserializer
+      this.deserializer = newDeserializer(config, view);
     }
 
     this.reuseDatum = !("parquet".equals(formatName));
@@ -336,38 +283,18 @@ public class DatasetSink extends AbstractSink implements Configurable {
     return view.newWriter();
   }
 
-  /**
-   * Not thread-safe.
-   *
-   * @param event
-   * @param reuse
-   * @return
-   */
-  private GenericRecord deserialize(Event event, GenericRecord reuse)
-      throws EventDeliveryException {
-    decoder = DecoderFactory.get().binaryDecoder(event.getBody(), decoder);
-    // no checked exception is thrown in the CacheLoader
-    DatumReader<GenericRecord> reader = readers.getUnchecked(schema(event));
-    try {
-      return reader.read(reuse, decoder);
-    } catch (IOException ex) {
-      throw new EventDeliveryException("Cannot deserialize event", ex);
-    }
-  }
-
-  private static Schema schema(Event event) throws EventDeliveryException {
-    Map<String, String> headers = event.getHeaders();
-    String schemaURL = headers.get(
-        DatasetSinkConstants.AVRO_SCHEMA_URL_HEADER);
-    try {
-      if (headers.get(DatasetSinkConstants.AVRO_SCHEMA_URL_HEADER) != null) {
-        return schemasFromURL.get(schemaURL);
-      } else {
-        return schemasFromLiteral.get(
-            headers.get(DatasetSinkConstants.AVRO_SCHEMA_LITERAL_HEADER));
-      }
-    } catch (ExecutionException ex) {
-      throw new EventDeliveryException("Cannot get schema", ex.getCause());
+  private static EventDeserializer<GenericRecord> newDeserializer(
+      Context config, View<GenericRecord> target) {
+    String requestedEventParser = config.getString(
+        CONFIG_EVENT_PARSER, DEFAULT_EVENT_PARSER);
+    if (requestedEventParser.equals(AVRO_EVENT_PARSER)) {
+      return new AvroDeserializer(
+          target.getDataset().getDescriptor().getSchema());
+    } else if (requestedEventParser.equals(CSV_EVENT_PARSER)) {
+      return new CSVDeserializer(config, target);
+    } else {
+      throw new IllegalArgumentException(
+          "Invalid event parser (not avro or csv): " + requestedEventParser);
     }
   }
 
