@@ -135,6 +135,11 @@ public class DatasetSinkConstants {
   public static final String CONFIG_CSV_ESCAPE_CHAR = "csv.escape-char";
 
   /**
+   * Constants for JSON readers
+   */
+  public static final String CONFIG_JSON_CHARSET = "json.charset";
+
+  /**
    * Hadoop authentication settings
    */
   public static final String AUTH_PROXY_USER = "auth.proxyUser";

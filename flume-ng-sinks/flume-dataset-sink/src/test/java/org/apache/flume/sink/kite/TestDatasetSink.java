@@ -910,6 +910,34 @@ public class TestDatasetSink {
   }
 
   @Test
+  public void testJSONEvents() throws EventDeliveryException {
+    config.put(CONFIG_ENTITY_PARSER, "json");
+
+    Datasets.delete(FILE_DATASET_URI);
+    Dataset<GenericRecord> created = Datasets.create(FILE_DATASET_URI,
+        new DatasetDescriptor.Builder(DESCRIPTOR)
+            .format("parquet")
+            .build());
+
+    Channel json = new MemoryChannel();
+    Configurables.configure(json, config);
+
+    for (GenericRecord record : expected) {
+      putToChannel(json, jsonEvent(record));
+    }
+
+    DatasetSink sink = sink(json, config);
+
+    // run the sink
+    sink.start();
+    sink.process();
+    sink.stop();
+
+    Assert.assertEquals(Sets.newHashSet(expected), read(created));
+    Assert.assertEquals("Should have committed", 0, remaining(json));
+  }
+
+  @Test
   public void testCSVEvents() throws EventDeliveryException {
     config.put(CONFIG_ENTITY_PARSER, "csv");
 
@@ -1060,6 +1088,11 @@ public class TestDatasetSink {
     e.setBody(serialize(datum, schema));
     e.setHeaders(headers);
     return e;
+  }
+
+  public static Event jsonEvent(Object datum) {
+    // Avro's toString JSON representation is good enough for testing
+    return EventBuilder.withBody(datum.toString(), Charsets.UTF_8);
   }
 
   public static Event csvEvent(String data, @Nullable String header) {
