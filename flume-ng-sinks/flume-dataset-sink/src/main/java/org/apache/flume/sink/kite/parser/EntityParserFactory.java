@@ -36,6 +36,8 @@ public class EntityParserFactory {
 
     if (parserType.equals(AVRO_ENTITY_PARSER)) {
       parser = new AvroParser.Builder().build(datasetSchema, config);
+    } else if (parserType.equals(CSV_ENTITY_PARSER)) {
+      parser = new CSVParser.Builder().build(datasetSchema, config);
     } else {
 
       Class<? extends EntityParser.Builder> builderClass;

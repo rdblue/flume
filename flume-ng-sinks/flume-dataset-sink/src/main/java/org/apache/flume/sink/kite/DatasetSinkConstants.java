@@ -83,9 +83,11 @@ public class DatasetSinkConstants {
    * Built-in entity parsers
    */
   public static final String AVRO_ENTITY_PARSER = "avro";
+  public static final String CSV_ENTITY_PARSER = "csv";
+  public static final String JSON_ENTITY_PARSER = "json";
   public static final String DEFAULT_ENTITY_PARSER = AVRO_ENTITY_PARSER;
   public static final String[] AVAILABLE_PARSERS = new String[] {
-    AVRO_ENTITY_PARSER
+    AVRO_ENTITY_PARSER, CSV_ENTITY_PARSER, JSON_ENTITY_PARSER
   };
 
   /**
@@ -122,6 +124,15 @@ public class DatasetSinkConstants {
   public static final String AVRO_SCHEMA_LITERAL_HEADER =
       "flume.avro.schema.literal";
   public static final String AVRO_SCHEMA_URL_HEADER = "flume.avro.schema.url";
+
+  /**
+   * Headers for CSV readers
+   */
+  public static final String CONFIG_CSV_HEADER = "csv.header";
+  public static final String CONFIG_CSV_CHARSET = "csv.charset";
+  public static final String CONFIG_CSV_DELIMITER = "csv.delimiter";
+  public static final String CONFIG_CSV_QUOTE_CHAR = "csv.quote-char";
+  public static final String CONFIG_CSV_ESCAPE_CHAR = "csv.escape-char";
 
   /**
    * Hadoop authentication settings

@@ -18,6 +18,8 @@
 
 package org.apache.flume.sink.kite;
 
+import com.google.common.base.Charsets;
+import org.apache.flume.event.EventBuilder;
 import org.apache.flume.sink.kite.parser.EntityParser;
 import org.apache.flume.sink.kite.policy.FailurePolicy;
 import com.google.common.base.Function;
@@ -74,6 +76,10 @@ import org.kitesdk.data.DatasetWriter;
 import org.kitesdk.data.Datasets;
 import org.kitesdk.data.PartitionStrategy;
 import org.kitesdk.data.View;
+
+import static org.apache.flume.sink.kite.DatasetSinkConstants.CONFIG_CSV_DELIMITER;
+import static org.apache.flume.sink.kite.DatasetSinkConstants.CONFIG_CSV_HEADER;
+import static org.apache.flume.sink.kite.DatasetSinkConstants.CONFIG_ENTITY_PARSER;
 import static org.mockito.Mockito.*;
 
 public class TestDatasetSink {
@@ -206,7 +212,7 @@ public class TestDatasetSink {
   }
 
   @Test
-  public void testFileStore() throws EventDeliveryException, NonRecoverableEventException, NonRecoverableEventException {
+  public void testFileStore() throws EventDeliveryException, NonRecoverableEventException {
     DatasetSink sink = sink(in, config);
 
     // run the sink
@@ -903,6 +909,80 @@ public class TestDatasetSink {
     Assert.assertEquals("Should have committed", 0, remaining(in));
   }
 
+  @Test
+  public void testCSVEvents() throws EventDeliveryException {
+    config.put(CONFIG_ENTITY_PARSER, "csv");
+
+    Channel csv = new MemoryChannel();
+    Configurables.configure(csv, config);
+
+    putToChannel(csv,
+        csvEvent("1,msg1", null), // no header, use the schema's order
+        csvEvent("msg2,2", "msg,id"),
+        csvEvent("3,msg3", "id,msg"));
+
+    DatasetSink sink = sink(csv, config);
+
+    // run the sink
+    sink.start();
+    sink.process();
+    sink.stop();
+
+    Assert.assertEquals("Should match expected records",
+        Sets.newHashSet(expected), read(Datasets.load(FILE_DATASET_URI)));
+    Assert.assertEquals("Should have committed", 0, remaining(csv));
+  }
+
+  @Test
+  public void testCSVEventsWithHeader() throws EventDeliveryException {
+    config.put(CONFIG_ENTITY_PARSER, "csv");
+    config.put(CONFIG_CSV_HEADER, "msg,id");
+
+    Channel csv = new MemoryChannel();
+    Configurables.configure(csv, config);
+
+    putToChannel(csv,
+        csvEvent("msg1,1", null), // no header, use the default header
+        csvEvent("msg2,2", "msg,id"),
+        csvEvent("3,msg3", "id,msg"));
+
+    DatasetSink sink = sink(csv, config);
+
+    // run the sink
+    sink.start();
+    sink.process();
+    sink.stop();
+
+    Assert.assertEquals("Should match expected records",
+        Sets.newHashSet(expected), read(Datasets.load(FILE_DATASET_URI)));
+    Assert.assertEquals("Should have committed", 0, remaining(csv));
+  }
+
+  @Test
+  public void testCSVEventsWithCSVOptions() throws EventDeliveryException {
+    config.put(CONFIG_ENTITY_PARSER, "csv");
+    config.put(CONFIG_CSV_DELIMITER, "|");
+
+    Channel csv = new MemoryChannel();
+    Configurables.configure(csv, config);
+
+    putToChannel(csv,
+        csvEvent("1|msg1", null), // no header, use the schema's order
+        csvEvent("msg2|2", "msg,id"),
+        csvEvent("3|msg3", "id,msg"));
+
+    DatasetSink sink = sink(csv, config);
+
+    // run the sink
+    sink.start();
+    sink.process();
+    sink.stop();
+
+    Assert.assertEquals("Should match expected records",
+        Sets.newHashSet(expected), read(Datasets.load(FILE_DATASET_URI)));
+    Assert.assertEquals("Should have committed", 0, remaining(csv));
+  }
+
   public static DatasetSink sink(Channel in, Context config) {
     DatasetSink sink = new DatasetSink();
     sink.setChannel(in);
@@ -980,6 +1060,14 @@ public class TestDatasetSink {
     e.setBody(serialize(datum, schema));
     e.setHeaders(headers);
     return e;
+  }
+
+  public static Event csvEvent(String data, @Nullable String header) {
+    Map<String, String> headers = Maps.newHashMap();
+    if (header != null) {
+      headers.put(CONFIG_CSV_HEADER, header);
+    }
+    return EventBuilder.withBody(data, Charsets.UTF_8, headers);
   }
 
   @SuppressWarnings("unchecked")
